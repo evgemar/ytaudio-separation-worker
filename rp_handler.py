@@ -66,11 +66,18 @@ def separate_audio(input_path, model_name=DEFAULT_MODEL):
         background_path = None
 
         for output_file in outputs:
+            # audio-separator may return relative filenames; resolve against output_dir
+            resolved = output_file if os.path.isabs(output_file) else os.path.join(output_dir, output_file)
+            if not os.path.exists(resolved):
+                # Fallback: search output_dir for the basename
+                candidate = os.path.join(output_dir, os.path.basename(output_file))
+                if os.path.exists(candidate):
+                    resolved = candidate
             filename = Path(output_file).name.lower()
             if 'vocal' in filename:
-                vocals_path = output_file
-            elif 'background' in filename or 'instrument' in filename or 'music' in filename:
-                background_path = output_file
+                vocals_path = resolved
+            elif 'background' in filename or 'instrument' in filename or 'music' in filename or 'no_vocals' in filename or 'instrumental' in filename:
+                background_path = resolved
 
         if not vocals_path or not background_path:
             raise ValueError("Could not find both vocals and background outputs")
