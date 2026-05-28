@@ -49,17 +49,17 @@ def convert_to_wav(audio_data, output_path):
 def separate_audio(input_path, model_name=DEFAULT_MODEL):
     """Separate vocals and background using audio-separator"""
     try:
-        # Initialize separator
-        separator = Separator()
+        # Create output directory
+        output_dir = tempfile.mkdtemp()
+
+        # Initialize separator (audio-separator takes output_dir in the constructor)
+        separator = Separator(output_dir=output_dir)
 
         # Load model (use GPU if available)
         separator.load_model(model_filename=model_name)
 
-        # Create output directory
-        output_dir = tempfile.mkdtemp()
-
         # Perform separation - returns list of output files
-        outputs = separator.separate(input_path, output_dir=output_dir)
+        outputs = separator.separate(input_path)
 
         # Find vocals and background files
         vocals_path = None
