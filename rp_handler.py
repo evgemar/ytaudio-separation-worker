@@ -6,6 +6,9 @@ from audio_separator.separator import Separator
 from pathlib import Path
 import logging
 import subprocess
+import time
+
+import requests
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -88,8 +91,36 @@ def separate_audio(input_path, model_name=DEFAULT_MODEL):
         logger.error(f"Separation failed: {e}")
         raise
 
+def _put_to_presigned(url, path):
+    """HTTP-PUT raw bytes to a presigned URL. No Content-Type (URL signed
+    without one). Raises on non-2xx."""
+    with open(path, 'rb') as fh:
+        body = fh.read()
+    r = requests.put(url, data=body, timeout=300)
+    if r.status_code not in (200, 204):
+        snippet = (r.text or '')[:500]
+        raise RuntimeError(
+            f"presigned PUT failed status={r.status_code} body={snippet}"
+        )
+
+
 def handler(job):
-    """RunPod handler for audio separation"""
+    """RunPod handler for audio separation.
+
+    Input:
+      { audio_base64 | audio_url, model?,
+        # Optional presigned PUT URLs (S3 / R2). When provided the worker
+        # uploads each stem to the corresponding URL and returns a tiny
+        # result instead of inline base64 (which RunPod /job-done rejects
+        # past ~6 MB).
+        vocals_put_url?, background_put_url? }
+
+    Output (when *_put_url provided):
+      { stems_uploaded: true, model_used, metadata }
+    Output (legacy):
+      { vocals_base64, background_base64, model_used }
+    """
+    t_start = time.perf_counter()
     try:
         job_input = job["input"]
 
@@ -118,9 +149,44 @@ def handler(job):
 
             # Perform separation
             logger.info("Starting audio separation")
+            t_sep = time.perf_counter()
             vocals_path, background_path, output_dir = separate_audio(input_audio_path, model)
+            sep_time_s = time.perf_counter() - t_sep
 
-            # Read output files and convert to base64
+            vocals_put_url = job_input.get("vocals_put_url")
+            background_put_url = job_input.get("background_put_url")
+            use_presigned = bool(vocals_put_url or background_put_url)
+
+            if use_presigned:
+                t_up = time.perf_counter()
+                if vocals_put_url:
+                    _put_to_presigned(vocals_put_url, vocals_path)
+                if background_put_url:
+                    _put_to_presigned(background_put_url, background_path)
+                upload_time_s = time.perf_counter() - t_up
+
+                # Clean up output directory
+                import shutil
+                shutil.rmtree(output_dir, ignore_errors=True)
+
+                total_time_s = time.perf_counter() - t_start
+                logger.info(
+                    f"[roformer] total={total_time_s:.2f}s sep={sep_time_s:.2f}s "
+                    f"upload={upload_time_s:.2f}s (stems_uploaded)"
+                )
+                return {
+                    "stems_uploaded": True,
+                    "model_used": model,
+                    "metadata": {
+                        "model": model,
+                        "separation_time_seconds": sep_time_s,
+                        "upload_time_seconds": upload_time_s,
+                        "total_time_seconds": total_time_s,
+                    },
+                }
+
+            # Legacy inline-base64 path. Only safe for short clips; RunPod
+            # /job-done rejects results larger than a few MB.
             with open(vocals_path, 'rb') as f:
                 vocals_base64 = base64.b64encode(f.read()).decode('utf-8')
 
@@ -131,11 +197,14 @@ def handler(job):
             import shutil
             shutil.rmtree(output_dir, ignore_errors=True)
 
-            logger.info("Separation completed successfully")
+            total_time_s = time.perf_counter() - t_start
+            logger.info(
+                f"[roformer] total={total_time_s:.2f}s sep={sep_time_s:.2f}s (base64)"
+            )
             return {
                 "vocals_base64": vocals_base64,
                 "background_base64": background_base64,
-                "model_used": model
+                "model_used": model,
             }
 
     except Exception as e:
